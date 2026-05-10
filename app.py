@@ -1,0 +1,445 @@
+import csv
+import io
+import os
+import sqlite3
+import traceback
+from datetime import datetime
+from html import escape
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlparse
+
+
+BASE_DIR = Path(__file__).resolve().parent
+DB_FILE = Path(os.environ.get("DB_PATH", BASE_DIR / "animales.db"))
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+
+def using_postgres():
+    return bool(DATABASE_URL)
+
+
+def db_connect():
+    if using_postgres():
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise RuntimeError(
+                "Para usar Supabase/PostgreSQL instale dependencias con: "
+                "python3 -m pip install -r requirements.txt"
+            ) from exc
+        return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON;")
+    return conn
+
+
+def db_sql(query):
+    if using_postgres():
+        return query.replace("?", "%s")
+    return query
+
+
+def execute(conn, query, params=()):
+    return conn.execute(db_sql(query), params)
+
+
+def get_actions():
+    with db_connect() as conn:
+        rows = execute(conn, 'SELECT "Accion" FROM "Acciones" ORDER BY "Accion"').fetchall()
+    return [row["Accion"] for row in rows]
+
+
+def date_clauses(column, start, end):
+    clauses = []
+    params = []
+    start = (start or "").strip()
+    end = (end or "").strip()
+
+    if start:
+        clauses.append(f"{column} >= ?")
+        params.append(start)
+
+    if end:
+        if len(end) in (4, 7):
+            clauses.append(f"{column} <= (? || 'Z')")
+            params.append(end)
+        else:
+            clauses.append(f"{column} <= ?")
+            params.append(end)
+
+    return clauses, params
+
+
+def run_query(view, filters):
+    params = []
+
+    if view == "pesos":
+        join_type = "JOIN" if filters.get("only_with_weights") == "1" else "LEFT JOIN"
+        query = f"""
+            SELECT
+                d."IDE",
+                d."IDV",
+                d."SEXO",
+                d."RAZA",
+                d."CRUZA",
+                d."FECHANAC",
+                p."Peso",
+                p."Fecha",
+                p."Hora",
+                p."GDM",
+                p."Nota"
+            FROM "DatoAnimal" d
+            {join_type} "Pesos" p ON d."IDE" = p."IDE"
+            WHERE 1=1
+        """
+        order_by = ' ORDER BY d."IDE", p."Fecha", p."Hora"'
+    elif view == "acciones":
+        query = """
+            SELECT
+                d."IDE",
+                d."IDV",
+                d."SEXO",
+                d."RAZA",
+                d."CRUZA",
+                d."FECHANAC",
+                l."Fecha",
+                l."Accion"
+            FROM "DatoAnimal" d
+            LEFT JOIN "Lecturas" l ON d."IDE" = l."IDE"
+            WHERE 1=1
+        """
+        order_by = ' ORDER BY d."IDE", l."Fecha"'
+    else:
+        view = "animales"
+        query = 'SELECT d."IDE", d."IDV", d."SEXO", d."RAZA", d."CRUZA", d."FECHANAC" FROM "DatoAnimal" d WHERE 1=1'
+        order_by = ' ORDER BY d."IDE"'
+
+    ide = (filters.get("ide") or "").strip()
+    if ide:
+        query += ' AND CAST(d."IDE" AS TEXT) LIKE ?'
+        params.append(f"%{ide}%")
+
+    clauses, clause_params = date_clauses(
+        'd."FECHANAC"',
+        filters.get("fecha_desde"),
+        filters.get("fecha_hasta"),
+    )
+    for clause in clauses:
+        query += f" AND {clause}"
+    params.extend(clause_params)
+
+    action = filters.get("accion")
+    if view == "acciones" and action and action != "Todos":
+        query += ' AND l."Accion" = ?'
+        params.append(action)
+
+    with db_connect() as conn:
+        rows = execute(conn, query + order_by, params).fetchall()
+
+    cols = list(rows[0].keys()) if rows else []
+    return view, list(cols), rows
+
+
+def get_idv_for_ide(ide):
+    with db_connect() as conn:
+        row = execute(conn, 'SELECT "IDV" FROM "DatoAnimal" WHERE "IDE" = ?', (ide,)).fetchone()
+    return row["IDV"] if row else None
+
+
+def add_action(ide, action, date_text):
+    if not ide or not action or not date_text:
+        return False, "Debe completar IDE, acción y fecha."
+
+    idv = get_idv_for_ide(ide)
+    if idv is None:
+        return False, f"No se encontró IDV para IDE {ide}."
+
+    with db_connect() as conn:
+        execute(
+            conn,
+            'INSERT INTO "Lecturas" ("IDE", "IDV", "Fecha", "Accion") VALUES (?, ?, ?, ?)',
+            (ide, idv, date_text, action),
+        )
+        conn.commit()
+    return True, "Acción registrada correctamente."
+
+
+def change_ide(current_ide, new_ide, date_text):
+    if not current_ide or not new_ide or not date_text:
+        return False, "Debe completar IDE actual, IDE nuevo y fecha."
+
+    try:
+        datetime.strptime(date_text, "%Y-%m-%d")
+    except ValueError:
+        return False, "La fecha debe tener formato YYYY-MM-DD."
+
+    with db_connect() as conn:
+        try:
+            execute(conn, "BEGIN;")
+            exists = execute(conn, 'SELECT COUNT(*) AS total FROM "DatoAnimal" WHERE "IDE" = ?', (current_ide,)).fetchone()
+            if exists["total"] == 0:
+                raise ValueError("El IDE actual no existe.")
+
+            duplicated = execute(conn, 'SELECT COUNT(*) AS total FROM "DatoAnimal" WHERE "IDE" = ?', (new_ide,)).fetchone()
+            if duplicated["total"] > 0:
+                raise ValueError("El IDE nuevo ya existe.")
+
+            execute(conn, 'UPDATE "DatoAnimal" SET "IDE" = ? WHERE "IDE" = ?', (new_ide, current_ide))
+            execute(conn, 'UPDATE "Pesos" SET "IDE" = ? WHERE "IDE" = ?', (new_ide, current_ide))
+            execute(conn, 'UPDATE "Lecturas" SET "IDE" = ? WHERE "IDE" = ?', (new_ide, current_ide))
+            execute(
+                conn,
+                'INSERT INTO "Caravanas" ("IDEi", "IDEf", "Fecha") VALUES (?, ?, ?)',
+                (current_ide, new_ide, date_text),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return True, f"IDE {current_ide} cambiado a {new_ide}."
+
+
+def export_csv(cols, rows):
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(cols)
+    for row in rows:
+        writer.writerow(["" if row[col] is None else row[col] for col in cols])
+    return output.getvalue().encode("utf-8-sig")
+
+
+def html_page(title, body, message=None, message_type="ok", active_view="animales"):
+    flash = ""
+    if message:
+        flash = f'<div class="flash {escape(message_type)}">{escape(message)}</div>'
+    active = {
+        "animales": "active" if active_view == "animales" else "",
+        "pesos": "active" if active_view == "pesos" else "",
+        "acciones": "active" if active_view == "acciones" else "",
+    }
+    return f"""<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escape(title)}</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header>
+    <h1>Consultas de Animales</h1>
+    <nav>
+      <a class="{active["animales"]}" href="/?view=animales">Animales</a>
+      <a class="{active["pesos"]}" href="/?view=pesos">Pesos</a>
+      <a class="{active["acciones"]}" href="/?view=acciones">Acciones</a>
+    </nav>
+  </header>
+  <main>
+    {flash}
+    {body}
+  </main>
+</body>
+</html>"""
+
+
+def filters_form(view, filters, actions):
+    selected = lambda value: "selected" if filters.get("accion", "Todos") == value else ""
+    checked = "checked" if filters.get("only_with_weights") == "1" else ""
+    action_options = "\n".join(
+        f'<option value="{escape(action)}" {selected(action)}>{escape(action)}</option>'
+        for action in ["Todos"] + actions
+    )
+    return f"""
+<form class="filters" method="get" action="/">
+  <input type="hidden" name="view" value="{escape(view)}">
+  <label>IDE
+    <input name="ide" value="{escape(filters.get("ide", ""))}" placeholder="Busca parcial">
+  </label>
+  <label>FNac. desde
+    <input name="fecha_desde" value="{escape(filters.get("fecha_desde", ""))}" placeholder="YYYY, YYYY-MM o YYYY-MM-DD">
+  </label>
+  <label>FNac. hasta
+    <input name="fecha_hasta" value="{escape(filters.get("fecha_hasta", ""))}" placeholder="YYYY, YYYY-MM o YYYY-MM-DD">
+  </label>
+  <label class="acciones">Acción
+    <select name="accion">{action_options}</select>
+  </label>
+  <label class="checkbox">
+    <input type="checkbox" name="only_with_weights" value="1" {checked}>
+    Solo con pesajes
+  </label>
+  <button type="submit">Consultar</button>
+  <a class="button secondary" href="/?view={escape(view)}">Limpiar</a>
+</form>
+"""
+
+
+def table_html(cols, rows, filters, view):
+    if not cols:
+        return '<section class="empty">No hay resultados para mostrar.</section>'
+
+    export_params = {k: v for k, v in filters.items() if v and k not in {"message", "type"}}
+    export_params["view"] = view
+    query = urlencode(export_params)
+    export_link = f"/export?{escape(query)}"
+    head = "".join(f"<th>{escape(col)}</th>" for col in cols)
+    body_rows = []
+    for row in rows:
+        cells = "".join(f"<td>{escape('' if row[col] is None else str(row[col]))}</td>" for col in cols)
+        body_rows.append(f"<tr>{cells}</tr>")
+    return f"""
+<section class="results-head">
+  <strong>Total filas: {len(rows)}</strong>
+  <a class="button" href="{export_link}">Exportar CSV</a>
+</section>
+<div class="table-wrap">
+  <table>
+    <thead><tr>{head}</tr></thead>
+    <tbody>{''.join(body_rows)}</tbody>
+  </table>
+</div>
+"""
+
+
+def action_form(actions):
+    options = "".join(f'<option value="{escape(action)}">{escape(action)}</option>' for action in actions)
+    today = datetime.now().strftime("%d/%m/%Y")
+    return f"""
+<section class="panel">
+  <h2>Agregar acción</h2>
+  <form method="post" action="/add-action">
+    <label>IDE <input name="ide" required></label>
+    <label>Acción <select name="accion" required>{options}</select></label>
+    <label>Fecha <input name="fecha" value="{today}" required></label>
+    <button type="submit">Guardar acción</button>
+  </form>
+</section>
+"""
+
+
+def change_ide_form():
+    today = datetime.now().strftime("%Y-%m-%d")
+    return f"""
+<section class="panel">
+  <h2>Cambiar IDE</h2>
+  <form method="post" action="/change-ide">
+    <label>IDE actual <input name="ide_actual" required></label>
+    <label>IDE nuevo <input name="ide_nuevo" required></label>
+    <label>Fecha <input name="fecha" value="{today}" required></label>
+    <button type="submit">Cambiar IDE</button>
+  </form>
+</section>
+"""
+
+
+class AppHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        if urlparse(self.path).path == "/":
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            return
+        self.send_response(HTTPStatus.NOT_FOUND)
+        self.end_headers()
+
+    def send_html(self, html, status=HTTPStatus.OK):
+        data = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def redirect(self, path):
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", path)
+        self.end_headers()
+
+    def read_form(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        data = self.rfile.read(length).decode("utf-8")
+        return {key: values[0] for key, values in parse_qs(data).items()}
+
+    def do_GET(self):
+        try:
+            parsed = urlparse(self.path)
+            params = {key: values[0] for key, values in parse_qs(parsed.query).items()}
+
+            if parsed.path == "/static/styles.css":
+                css = (BASE_DIR / "static" / "styles.css").read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/css; charset=utf-8")
+                self.send_header("Content-Length", str(len(css)))
+                self.end_headers()
+                self.wfile.write(css)
+                return
+
+            if parsed.path == "/export":
+                view, cols, rows = run_query(params.get("view", "animales"), params)
+                data = export_csv(cols, rows)
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition", f'attachment; filename="{view}.csv"')
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
+            if parsed.path != "/":
+                self.send_html(html_page("No encontrado", "<p>No encontrado.</p>"), HTTPStatus.NOT_FOUND)
+                return
+
+            actions = get_actions()
+            view, cols, rows = run_query(params.get("view", "animales"), params)
+            message = params.get("message")
+            message_type = params.get("type", "ok")
+            body = (
+                filters_form(view, params, actions)
+                + table_html(cols, rows, params, view)
+                + '<section class="forms-grid">'
+                + action_form(actions)
+                + change_ide_form()
+                + "</section>"
+            )
+            self.send_html(html_page("Consultas de Animales", body, message, message_type, view))
+        except Exception as exc:
+            traceback.print_exc()
+            body = f"""
+<section class="empty">
+  <h2>Error al consultar la base</h2>
+  <p>{escape(str(exc))}</p>
+</section>
+"""
+            self.send_html(html_page("Error", body), HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def do_POST(self):
+        try:
+            form = self.read_form()
+            if self.path == "/add-action":
+                ok, message = add_action(form.get("ide"), form.get("accion"), form.get("fecha"))
+            elif self.path == "/change-ide":
+                ok, message = change_ide(form.get("ide_actual"), form.get("ide_nuevo"), form.get("fecha"))
+            else:
+                self.send_html(html_page("No encontrado", "<p>No encontrado.</p>"), HTTPStatus.NOT_FOUND)
+                return
+            self.redirect("/?" + urlencode({"message": message, "type": "ok" if ok else "error"}))
+        except Exception as exc:
+            self.redirect("/?" + urlencode({"message": str(exc), "type": "error"}))
+
+
+def main():
+    port = int(os.environ.get("PORT", "8000"))
+    host = os.environ.get("HOST", "127.0.0.1")
+    server = ThreadingHTTPServer((host, port), AppHandler)
+    print(f"App web lista en http://{host}:{port}")
+    print(f"Base de datos: {'Supabase/PostgreSQL' if using_postgres() else DB_FILE}")
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

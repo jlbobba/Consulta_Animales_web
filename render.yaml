@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: consulta-animales-web
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: HOST=0.0.0.0 python3 app.py
+    envVars:
+      - key: DATABASE_URL
+        sync: false
