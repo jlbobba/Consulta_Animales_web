@@ -40,8 +40,32 @@ Para usar Supabase/PostgreSQL:
 
 ```bash
 python3 -m pip install -r requirements.txt
-DATABASE_URL="postgresql://postgres:TU_PASSWORD@HOST:5432/postgres?sslmode=require" python3 app.py
+DATABASE_URL="postgresql://postgres:TU_PASSWORD@HOST:5432/postgres?sslmode=require" \
+APP_USERS="consulta:clave-consulta:consulta,admin:clave-editor:editor" \
+SESSION_SECRET="una-clave-larga-aleatoria" \
+python3 app.py
 ```
+
+## Usuarios
+
+La app tiene dos roles:
+
+- `consulta`: puede ver consultas y exportar CSV.
+- `editor`: puede ver consultas, exportar CSV, agregar acciones y cambiar IDE.
+
+Los usuarios se configuran con la variable `APP_USERS`:
+
+```text
+usuario:contraseña:rol,usuario2:contraseña2:rol
+```
+
+Ejemplo:
+
+```text
+APP_USERS="consulta:clave1:consulta,admin:clave2:editor"
+```
+
+En Render también hay que configurar `SESSION_SECRET` con un texto largo y privado.
 
 ## Próximo paso: nube
 

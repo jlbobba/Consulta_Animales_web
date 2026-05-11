@@ -1,7 +1,13 @@
 import csv
+import base64
+import hashlib
+import hmac
 import io
+import json
 import os
+import secrets
 import sqlite3
+import time
 import traceback
 from datetime import datetime
 from html import escape
@@ -14,6 +20,79 @@ from urllib.parse import parse_qs, urlencode, urlparse
 BASE_DIR = Path(__file__).resolve().parent
 DB_FILE = Path(os.environ.get("DB_PATH", BASE_DIR / "animales.db"))
 DATABASE_URL = os.environ.get("DATABASE_URL")
+APP_USERS = os.environ.get("APP_USERS", "")
+SESSION_SECRET = os.environ.get("SESSION_SECRET", "")
+SESSION_COOKIE = "consulta_animales_session"
+SESSION_MAX_AGE = 12 * 60 * 60
+
+
+def b64_encode(data):
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def b64_decode(data):
+    padding = "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode((data + padding).encode("ascii"))
+
+
+def auth_config_error():
+    if using_postgres() and not APP_USERS:
+        return "Falta configurar APP_USERS en las variables de entorno."
+    if using_postgres() and not SESSION_SECRET:
+        return "Falta configurar SESSION_SECRET en las variables de entorno."
+    return None
+
+
+def session_secret():
+    if SESSION_SECRET:
+        return SESSION_SECRET
+    return "local-dev-secret"
+
+
+def load_users():
+    raw_users = APP_USERS
+    if not raw_users and not using_postgres():
+        raw_users = "consulta:consulta:consulta,admin:admin:editor"
+
+    users = {}
+    for item in raw_users.split(","):
+        parts = item.strip().split(":", 2)
+        if len(parts) != 3:
+            continue
+        username, password, role = [part.strip() for part in parts]
+        if username and password and role in {"consulta", "editor"}:
+            users[username] = {"password": password, "role": role}
+    return users
+
+
+def sign_payload(payload):
+    data = b64_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    signature = hmac.new(session_secret().encode("utf-8"), data.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{data}.{signature}"
+
+
+def verify_session(cookie_value):
+    if not cookie_value or "." not in cookie_value:
+        return None
+    data, signature = cookie_value.rsplit(".", 1)
+    expected = hmac.new(session_secret().encode("utf-8"), data.encode("ascii"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        return None
+    try:
+        payload = json.loads(b64_decode(data).decode("utf-8"))
+    except Exception:
+        return None
+    if payload.get("exp", 0) < time.time():
+        return None
+    username = payload.get("username")
+    role = payload.get("role")
+    if not username or role not in {"consulta", "editor"}:
+        return None
+    return {"username": username, "role": role}
+
+
+def user_can_edit(user):
+    return bool(user and user.get("role") == "editor")
 
 
 def using_postgres():
@@ -213,7 +292,7 @@ def export_csv(cols, rows):
     return output.getvalue().encode("utf-8-sig")
 
 
-def html_page(title, body, message=None, message_type="ok", active_view="animales"):
+def html_page(title, body, message=None, message_type="ok", active_view="animales", user=None):
     flash = ""
     if message:
         flash = f'<div class="flash {escape(message_type)}">{escape(message)}</div>'
@@ -222,6 +301,15 @@ def html_page(title, body, message=None, message_type="ok", active_view="animale
         "pesos": "active" if active_view == "pesos" else "",
         "acciones": "active" if active_view == "acciones" else "",
     }
+    user_bar = ""
+    if user:
+        role_label = "Editor" if user.get("role") == "editor" else "Consulta"
+        user_bar = f"""
+    <div class="userbar">
+      <span>{escape(user["username"])} · {escape(role_label)}</span>
+      <form method="post" action="/logout"><button type="submit" class="secondary-button">Salir</button></form>
+    </div>
+"""
     return f"""<!doctype html>
 <html lang="es">
 <head>
@@ -238,6 +326,7 @@ def html_page(title, body, message=None, message_type="ok", active_view="animale
       <a class="{active["pesos"]}" href="/?view=pesos">Pesos</a>
       <a class="{active["acciones"]}" href="/?view=acciones">Acciones</a>
     </nav>
+    {user_bar}
   </header>
   <main>
     {flash}
@@ -245,6 +334,32 @@ def html_page(title, body, message=None, message_type="ok", active_view="animale
   </main>
 </body>
 </html>"""
+
+
+def login_page(message=None):
+    config_error = auth_config_error()
+    if config_error:
+        body = f"""
+<section class="login-panel">
+  <h2>Configuración pendiente</h2>
+  <p>{escape(config_error)}</p>
+</section>
+"""
+        return html_page("Login", body)
+
+    flash = f'<div class="flash error">{escape(message)}</div>' if message else ""
+    body = f"""
+{flash}
+<section class="login-panel">
+  <h2>Ingresar</h2>
+  <form method="post" action="/login">
+    <label>Usuario <input name="username" autocomplete="username" required></label>
+    <label>Contraseña <input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit">Entrar</button>
+  </form>
+</section>
+"""
+    return html_page("Login", body)
 
 
 def filters_form(view, filters, actions):
@@ -306,7 +421,14 @@ def table_html(cols, rows, filters, view):
 """
 
 
-def action_form(actions):
+def action_form(actions, user):
+    if not user_can_edit(user):
+        return """
+<section class="panel muted">
+  <h2>Agregar acción</h2>
+  <p>Disponible solo para usuarios editores.</p>
+</section>
+"""
     options = "".join(f'<option value="{escape(action)}">{escape(action)}</option>' for action in actions)
     today = datetime.now().strftime("%d/%m/%Y")
     return f"""
@@ -322,7 +444,14 @@ def action_form(actions):
 """
 
 
-def change_ide_form():
+def change_ide_form(user):
+    if not user_can_edit(user):
+        return """
+<section class="panel muted">
+  <h2>Cambiar IDE</h2>
+  <p>Disponible solo para usuarios editores.</p>
+</section>
+"""
     today = datetime.now().strftime("%Y-%m-%d")
     return f"""
 <section class="panel">
@@ -355,10 +484,34 @@ class AppHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def send_html_with_cookie(self, html, cookie, status=HTTPStatus.OK):
+        data = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Set-Cookie", cookie)
+        self.end_headers()
+        self.wfile.write(data)
+
     def redirect(self, path):
         self.send_response(HTTPStatus.SEE_OTHER)
         self.send_header("Location", path)
         self.end_headers()
+
+    def redirect_with_cookie(self, path, cookie):
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", path)
+        self.send_header("Set-Cookie", cookie)
+        self.end_headers()
+
+    def current_user(self):
+        cookie_header = self.headers.get("Cookie", "")
+        cookies = {}
+        for item in cookie_header.split(";"):
+            if "=" in item:
+                key, value = item.strip().split("=", 1)
+                cookies[key] = value
+        return verify_session(cookies.get(SESSION_COOKIE))
 
     def read_form(self):
         length = int(self.headers.get("Content-Length", "0"))
@@ -377,6 +530,15 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(css)))
                 self.end_headers()
                 self.wfile.write(css)
+                return
+
+            if parsed.path == "/login":
+                self.send_html(login_page(params.get("message")))
+                return
+
+            user = self.current_user()
+            if not user:
+                self.redirect("/login")
                 return
 
             if parsed.path == "/export":
@@ -402,11 +564,11 @@ class AppHandler(BaseHTTPRequestHandler):
                 filters_form(view, params, actions)
                 + table_html(cols, rows, params, view)
                 + '<section class="forms-grid">'
-                + action_form(actions)
-                + change_ide_form()
+                + action_form(actions, user)
+                + change_ide_form(user)
                 + "</section>"
             )
-            self.send_html(html_page("Consultas de Animales", body, message, message_type, view))
+            self.send_html(html_page("Consultas de Animales", body, message, message_type, view, user))
         except Exception as exc:
             traceback.print_exc()
             body = f"""
@@ -420,9 +582,45 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             form = self.read_form()
+            if self.path == "/login":
+                users = load_users()
+                username = form.get("username", "").strip()
+                password = form.get("password", "")
+                user_record = users.get(username)
+                if not user_record or not secrets.compare_digest(password, user_record["password"]):
+                    self.redirect("/login?" + urlencode({"message": "Usuario o contraseña incorrectos."}))
+                    return
+                payload = {
+                    "username": username,
+                    "role": user_record["role"],
+                    "exp": int(time.time() + SESSION_MAX_AGE),
+                }
+                cookie = (
+                    f"{SESSION_COOKIE}={sign_payload(payload)}; Path=/; HttpOnly; "
+                    f"SameSite=Lax; Max-Age={SESSION_MAX_AGE}"
+                )
+                self.redirect_with_cookie("/", cookie)
+                return
+
+            if self.path == "/logout":
+                cookie = f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+                self.redirect_with_cookie("/login", cookie)
+                return
+
+            user = self.current_user()
+            if not user:
+                self.redirect("/login")
+                return
+
             if self.path == "/add-action":
+                if not user_can_edit(user):
+                    self.redirect("/?" + urlencode({"message": "No tiene permiso para agregar acciones.", "type": "error"}))
+                    return
                 ok, message = add_action(form.get("ide"), form.get("accion"), form.get("fecha"))
             elif self.path == "/change-ide":
+                if not user_can_edit(user):
+                    self.redirect("/?" + urlencode({"message": "No tiene permiso para cambiar IDE.", "type": "error"}))
+                    return
                 ok, message = change_ide(form.get("ide_actual"), form.get("ide_nuevo"), form.get("fecha"))
             else:
                 self.send_html(html_page("No encontrado", "<p>No encontrado.</p>"), HTTPStatus.NOT_FOUND)
