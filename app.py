@@ -154,6 +154,25 @@ def date_clauses(column, start, end):
     return clauses, params
 
 
+def clean_filter_params(params):
+    allowed = {"ide", "fecha_desde", "fecha_hasta", "accion", "only_with_weights"}
+    return {key: value for key, value in params.items() if key in allowed and value}
+
+
+def view_url(view, filters):
+    params = clean_filter_params(filters)
+    params["view"] = view
+    return "/?" + urlencode(params)
+
+
+def path_with_message(path, message, message_type):
+    parsed = urlparse(path or "/")
+    params = {key: values[0] for key, values in parse_qs(parsed.query).items()}
+    params["message"] = message
+    params["type"] = message_type
+    return (parsed.path or "/") + "?" + urlencode(params)
+
+
 def run_query(view, filters):
     params = []
 
@@ -216,6 +235,12 @@ def run_query(view, filters):
     if view == "acciones" and action and action != "Todos":
         query += ' AND l."Accion" = ?'
         params.append(action)
+    elif action and action != "Todos":
+        query += ' AND EXISTS (SELECT 1 FROM "Lecturas" lf WHERE lf."IDE" = d."IDE" AND lf."Accion" = ?)'
+        params.append(action)
+
+    if view != "pesos" and filters.get("only_with_weights") == "1":
+        query += ' AND EXISTS (SELECT 1 FROM "Pesos" pf WHERE pf."IDE" = d."IDE")'
 
     with db_connect() as conn:
         rows = execute(conn, query + order_by, params).fetchall()
@@ -292,10 +317,11 @@ def export_csv(cols, rows):
     return output.getvalue().encode("utf-8-sig")
 
 
-def html_page(title, body, message=None, message_type="ok", active_view="animales", user=None):
+def html_page(title, body, message=None, message_type="ok", active_view="animales", user=None, filters=None):
     flash = ""
     if message:
         flash = f'<div class="flash {escape(message_type)}">{escape(message)}</div>'
+    filters = filters or {}
     active = {
         "animales": "active" if active_view == "animales" else "",
         "pesos": "active" if active_view == "pesos" else "",
@@ -322,9 +348,9 @@ def html_page(title, body, message=None, message_type="ok", active_view="animale
   <header>
     <h1>Consultas de Animales</h1>
     <nav>
-      <a class="{active["animales"]}" href="/?view=animales">Animales</a>
-      <a class="{active["pesos"]}" href="/?view=pesos">Pesos</a>
-      <a class="{active["acciones"]}" href="/?view=acciones">Acciones</a>
+      <a class="{active["animales"]}" href="{escape(view_url("animales", filters))}">Animales</a>
+      <a class="{active["pesos"]}" href="{escape(view_url("pesos", filters))}">Pesos</a>
+      <a class="{active["acciones"]}" href="{escape(view_url("acciones", filters))}">Acciones</a>
     </nav>
     {user_bar}
   </header>
@@ -504,6 +530,14 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("Set-Cookie", cookie)
         self.end_headers()
 
+    def redirect_back(self, message, message_type="ok"):
+        referer = self.headers.get("Referer", "/")
+        parsed = urlparse(referer)
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+        self.redirect(path_with_message(path, message, message_type))
+
     def current_user(self):
         cookie_header = self.headers.get("Cookie", "")
         cookies = {}
@@ -560,6 +594,7 @@ class AppHandler(BaseHTTPRequestHandler):
             view, cols, rows = run_query(params.get("view", "animales"), params)
             message = params.get("message")
             message_type = params.get("type", "ok")
+            current_filters = clean_filter_params(params)
             body = (
                 filters_form(view, params, actions)
                 + table_html(cols, rows, params, view)
@@ -568,7 +603,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 + change_ide_form(user)
                 + "</section>"
             )
-            self.send_html(html_page("Consultas de Animales", body, message, message_type, view, user))
+            self.send_html(html_page("Consultas de Animales", body, message, message_type, view, user, current_filters))
         except Exception as exc:
             traceback.print_exc()
             body = f"""
@@ -614,20 +649,20 @@ class AppHandler(BaseHTTPRequestHandler):
 
             if self.path == "/add-action":
                 if not user_can_edit(user):
-                    self.redirect("/?" + urlencode({"message": "No tiene permiso para agregar acciones.", "type": "error"}))
+                    self.redirect_back("No tiene permiso para agregar acciones.", "error")
                     return
                 ok, message = add_action(form.get("ide"), form.get("accion"), form.get("fecha"))
             elif self.path == "/change-ide":
                 if not user_can_edit(user):
-                    self.redirect("/?" + urlencode({"message": "No tiene permiso para cambiar IDE.", "type": "error"}))
+                    self.redirect_back("No tiene permiso para cambiar IDE.", "error")
                     return
                 ok, message = change_ide(form.get("ide_actual"), form.get("ide_nuevo"), form.get("fecha"))
             else:
                 self.send_html(html_page("No encontrado", "<p>No encontrado.</p>"), HTTPStatus.NOT_FOUND)
                 return
-            self.redirect("/?" + urlencode({"message": message, "type": "ok" if ok else "error"}))
+            self.redirect_back(message, "ok" if ok else "error")
         except Exception as exc:
-            self.redirect("/?" + urlencode({"message": str(exc), "type": "error"}))
+            self.redirect_back(str(exc), "error")
 
 
 def main():
