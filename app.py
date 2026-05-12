@@ -173,6 +173,64 @@ def path_with_message(path, message, message_type):
     return (parsed.path or "/") + "?" + urlencode(params)
 
 
+def parse_number(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text.replace(",", "."))
+    except ValueError:
+        return None
+
+
+def parse_iso_date(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def add_pesos_calculations(cols, rows):
+    if not rows:
+        return cols, rows
+
+    calculated_rows = []
+    previous_by_ide = {}
+    for row in rows:
+        item = {col: row[col] for col in cols}
+        ide = item.get("IDE")
+        peso = parse_number(item.get("Peso"))
+        fecha = parse_iso_date(item.get("Fecha"))
+        gdm_calc = ""
+
+        if ide is not None and peso is not None and fecha is not None:
+            previous = previous_by_ide.get(str(ide))
+            if previous:
+                previous_fecha, previous_peso = previous
+                days = (fecha - previous_fecha).days
+                if days > 0:
+                    gdm_calc = f"{((peso - previous_peso) / days):.3f}"
+            previous_by_ide[str(ide)] = (fecha, peso)
+
+        item["GMD_Calc"] = gdm_calc
+        calculated_rows.append(item)
+
+    if "GMD_Calc" not in cols:
+        if "GDM" in cols:
+            insert_at = cols.index("GDM") + 1
+            cols = cols[:insert_at] + ["GMD_Calc"] + cols[insert_at:]
+        else:
+            cols = cols + ["GMD_Calc"]
+    return cols, calculated_rows
+
+
 def run_query(view, filters):
     params = []
 
@@ -246,6 +304,8 @@ def run_query(view, filters):
         rows = execute(conn, query + order_by, params).fetchall()
 
     cols = list(rows[0].keys()) if rows else []
+    if view == "pesos":
+        cols, rows = add_pesos_calculations(cols, rows)
     return view, list(cols), rows
 
 
@@ -428,6 +488,13 @@ def table_html(cols, rows, filters, view):
     export_params["view"] = view
     query = urlencode(export_params)
     export_link = f"/export?{escape(query)}"
+    summary_parts = [f"Total filas: {len(rows)}"]
+    if view == "pesos" and "Peso" in cols:
+        weights = [parse_number(row["Peso"]) for row in rows]
+        weights = [weight for weight in weights if weight is not None]
+        if weights:
+            summary_parts.append(f"Peso promedio: {(sum(weights) / len(weights)):.1f}")
+    summary = " | ".join(summary_parts)
     head = "".join(f"<th>{escape(col)}</th>" for col in cols)
     body_rows = []
     for row in rows:
@@ -435,7 +502,7 @@ def table_html(cols, rows, filters, view):
         body_rows.append(f"<tr>{cells}</tr>")
     return f"""
 <section class="results-head">
-  <strong>Total filas: {len(rows)}</strong>
+  <strong>{escape(summary)}</strong>
   <a class="button" href="{export_link}">Exportar CSV</a>
 </section>
 <div class="table-wrap">
