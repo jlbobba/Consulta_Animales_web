@@ -164,12 +164,16 @@ def clean_filter_params(params):
         "accion",
         "sexo",
         "only_with_weights",
+        "sort_by",
+        "sort_dir",
     }
     return {key: value for key, value in params.items() if key in allowed and value}
 
 
 def view_url(view, filters):
     params = clean_filter_params(filters)
+    params.pop("sort_by", None)
+    params.pop("sort_dir", None)
     params["view"] = view
     return "/?" + urlencode(params)
 
@@ -238,6 +242,40 @@ def add_pesos_calculations(cols, rows):
         else:
             cols = cols + ["GMD_Calc"]
     return cols, calculated_rows
+
+
+def sort_value(value):
+    if value is None or str(value).strip() == "":
+        return None
+
+    number = parse_number(value)
+    if number is not None:
+        return (0, number)
+
+    date_value = parse_iso_date(value)
+    if date_value is not None:
+        return (1, date_value)
+
+    return (2, str(value).lower())
+
+
+def sort_rows(cols, rows, filters):
+    sort_by = filters.get("sort_by")
+    sort_dir = filters.get("sort_dir", "asc")
+    if sort_by not in cols:
+        return rows
+
+    with_values = []
+    without_values = []
+    for row in rows:
+        value = sort_value(row[sort_by])
+        if value is None:
+            without_values.append(row)
+        else:
+            with_values.append((value, row))
+
+    with_values.sort(key=lambda item: item[0], reverse=sort_dir == "desc")
+    return [row for _, row in with_values] + without_values
 
 
 def run_query(view, filters):
@@ -339,6 +377,7 @@ def run_query(view, filters):
     cols = list(rows[0].keys()) if rows else []
     if view == "pesos":
         cols, rows = add_pesos_calculations(cols, rows)
+    rows = sort_rows(cols, rows, filters)
     return view, list(cols), rows
 
 
@@ -589,7 +628,19 @@ def table_html(cols, rows, filters, view):
         if weights:
             summary_parts.append(f"Peso promedio: {(sum(weights) / len(weights)):.1f}")
     summary = " | ".join(summary_parts)
-    head = "".join(f"<th>{escape(col)}</th>" for col in cols)
+    active_sort = filters.get("sort_by")
+    active_dir = filters.get("sort_dir", "asc")
+    head_cells = []
+    for col in cols:
+        next_dir = "desc" if active_sort == col and active_dir != "desc" else "asc"
+        sort_params = dict(export_params)
+        sort_params["sort_by"] = col
+        sort_params["sort_dir"] = next_dir
+        marker = " ▲" if active_sort == col and active_dir != "desc" else " ▼" if active_sort == col else ""
+        head_cells.append(
+            f'<th><a class="sort-link" href="/?{escape(urlencode(sort_params))}">{escape(col)}{marker}</a></th>'
+        )
+    head = "".join(head_cells)
     body_rows = []
     for row in rows:
         cells = "".join(f"<td>{escape('' if row[col] is None else str(row[col]))}</td>" for col in cols)
@@ -602,13 +653,13 @@ def table_html(cols, rows, filters, view):
     <form class="export-excel-form" method="get" action="/export">
       <input type="hidden" name="format" value="xlsx">
       {"".join(f'<input type="hidden" name="{escape(k)}" value="{escape(v)}">' for k, v in xlsx_params.items() if k != "format")}
+      <button type="submit">Exportar Excel</button>
       <label>Decimal
         <select name="decimal_sep">
           <option value=".">Punto</option>
           <option value=",">Coma</option>
         </select>
       </label>
-      <button type="submit">Exportar Excel</button>
     </form>
   </div>
 </section>
