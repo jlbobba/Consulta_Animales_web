@@ -164,7 +164,6 @@ def clean_filter_params(params):
         "accion",
         "sexo",
         "only_with_weights",
-        "decimal_sep",
     }
     return {key: value for key, value in params.items() if key in allowed and value}
 
@@ -436,15 +435,15 @@ def export_excel(cols, rows, decimal_sep="."):
     for cell in ws[1]:
         cell.font = Font(bold=True)
 
-    for row in rows:
-        values = []
-        for col in cols:
+    for row_index, row in enumerate(rows, start=2):
+        for col_index, col in enumerate(cols, start=1):
             value = row[col]
+            cell = ws.cell(row=row_index, column=col_index)
             if col in numeric_decimal_cols:
-                values.append(format_decimal_value(value, decimal_sep))
+                cell.value = format_decimal_value(value, decimal_sep)
+                cell.number_format = "@"
             else:
-                values.append("" if value is None else value)
-        ws.append(values)
+                cell.value = "" if value is None else value
 
     for column_cells in ws.columns:
         width = max(len(str(cell.value or "")) for cell in column_cells)
@@ -529,7 +528,6 @@ def login_page(message=None):
 def filters_form(view, filters, actions):
     selected = lambda value: "selected" if filters.get("accion", "Todos") == value else ""
     selected_sexo = lambda value: "selected" if filters.get("sexo", "Todos") == value else ""
-    selected_decimal = lambda value: "selected" if filters.get("decimal_sep", ".") == value else ""
     checked = "checked" if filters.get("only_with_weights") == "1" else ""
     action_options = "\n".join(
         f'<option value="{escape(action)}" {selected(action)}>{escape(action)}</option>'
@@ -563,12 +561,6 @@ def filters_form(view, filters, actions):
   <label class="acciones">Acción
     <select name="accion">{action_options}</select>
   </label>
-  <label>Decimal Excel
-    <select name="decimal_sep">
-      <option value="." {selected_decimal(".")}>Punto</option>
-      <option value="," {selected_decimal(",")}>Coma</option>
-    </select>
-  </label>
   <label class="checkbox">
     <input type="checkbox" name="only_with_weights" value="1" {checked}>
     Solo con pesajes
@@ -590,7 +582,6 @@ def table_html(cols, rows, filters, view):
     xlsx_params = dict(export_params)
     xlsx_params["format"] = "xlsx"
     csv_link = f"/export?{escape(urlencode(csv_params))}"
-    xlsx_link = f"/export?{escape(urlencode(xlsx_params))}"
     summary_parts = [f"Total filas: {len(rows)}"]
     if view == "pesos" and "Peso" in cols:
         weights = [parse_number(row["Peso"]) for row in rows]
@@ -608,7 +599,17 @@ def table_html(cols, rows, filters, view):
   <strong>{escape(summary)}</strong>
   <div class="export-actions">
     <a class="button secondary" href="{csv_link}">Exportar CSV</a>
-    <a class="button" href="{xlsx_link}">Exportar Excel</a>
+    <form class="export-excel-form" method="get" action="/export">
+      <input type="hidden" name="format" value="xlsx">
+      {"".join(f'<input type="hidden" name="{escape(k)}" value="{escape(v)}">' for k, v in xlsx_params.items() if k != "format")}
+      <label>Decimal
+        <select name="decimal_sep">
+          <option value=".">Punto</option>
+          <option value=",">Coma</option>
+        </select>
+      </label>
+      <button type="submit">Exportar Excel</button>
+    </form>
   </div>
 </section>
 <div class="table-wrap">

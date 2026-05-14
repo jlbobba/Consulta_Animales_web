@@ -144,8 +144,19 @@ select {
 
 .export-actions {
   display: flex;
+  align-items: end;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.export-excel-form {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+
+.export-excel-form label {
+  min-width: 92px;
 }
 
 .table-wrap {
