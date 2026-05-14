@@ -94,7 +94,7 @@ main {
 
 .filters {
   display: grid;
-  grid-template-columns: repeat(5, minmax(150px, 1fr)) auto auto;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
   gap: 12px;
   align-items: end;
   margin-bottom: 18px;
@@ -140,6 +140,12 @@ select {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 10px;
+}
+
+.export-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .table-wrap {

@@ -155,7 +155,17 @@ def date_clauses(column, start, end):
 
 
 def clean_filter_params(params):
-    allowed = {"ide", "fecha_desde", "fecha_hasta", "accion", "only_with_weights"}
+    allowed = {
+        "ide",
+        "fecha_desde",
+        "fecha_hasta",
+        "fecha_mov_desde",
+        "fecha_mov_hasta",
+        "accion",
+        "sexo",
+        "only_with_weights",
+        "decimal_sep",
+    }
     return {key: value for key, value in params.items() if key in allowed and value}
 
 
@@ -280,6 +290,11 @@ def run_query(view, filters):
         query += ' AND CAST(d."IDE" AS TEXT) LIKE ?'
         params.append(f"%{ide}%")
 
+    sexo = (filters.get("sexo") or "").strip()
+    if sexo and sexo != "Todos":
+        query += ' AND d."SEXO" = ?'
+        params.append(sexo)
+
     clauses, clause_params = date_clauses(
         'd."FECHANAC"',
         filters.get("fecha_desde"),
@@ -288,6 +303,25 @@ def run_query(view, filters):
     for clause in clauses:
         query += f" AND {clause}"
     params.extend(clause_params)
+
+    if view == "pesos":
+        mov_clauses, mov_params = date_clauses(
+            'p."Fecha"',
+            filters.get("fecha_mov_desde"),
+            filters.get("fecha_mov_hasta"),
+        )
+        for clause in mov_clauses:
+            query += f" AND {clause}"
+        params.extend(mov_params)
+    elif view == "acciones":
+        mov_clauses, mov_params = date_clauses(
+            'l."Fecha"',
+            filters.get("fecha_mov_desde"),
+            filters.get("fecha_mov_hasta"),
+        )
+        for clause in mov_clauses:
+            query += f" AND {clause}"
+        params.extend(mov_params)
 
     action = filters.get("accion")
     if view == "acciones" and action and action != "Todos":
@@ -377,6 +411,50 @@ def export_csv(cols, rows):
     return output.getvalue().encode("utf-8-sig")
 
 
+def format_decimal_value(value, decimal_sep):
+    number = parse_number(value)
+    if number is None:
+        return "" if value is None else str(value)
+    text = f"{number:.3f}".rstrip("0").rstrip(".")
+    if decimal_sep == ",":
+        text = text.replace(".", ",")
+    return text
+
+
+def export_excel(cols, rows, decimal_sep="."):
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+    except ImportError as exc:
+        raise RuntimeError("Falta instalar openpyxl para exportar Excel.") from exc
+
+    numeric_decimal_cols = {"Peso", "GDM", "GMD_Calc"}
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Resultados"
+    ws.append(cols)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+
+    for row in rows:
+        values = []
+        for col in cols:
+            value = row[col]
+            if col in numeric_decimal_cols:
+                values.append(format_decimal_value(value, decimal_sep))
+            else:
+                values.append("" if value is None else value)
+        ws.append(values)
+
+    for column_cells in ws.columns:
+        width = max(len(str(cell.value or "")) for cell in column_cells)
+        ws.column_dimensions[column_cells[0].column_letter].width = min(max(width + 2, 10), 28)
+
+    output = io.BytesIO()
+    wb.save(output)
+    return output.getvalue()
+
+
 def html_page(title, body, message=None, message_type="ok", active_view="animales", user=None, filters=None):
     flash = ""
     if message:
@@ -450,6 +528,8 @@ def login_page(message=None):
 
 def filters_form(view, filters, actions):
     selected = lambda value: "selected" if filters.get("accion", "Todos") == value else ""
+    selected_sexo = lambda value: "selected" if filters.get("sexo", "Todos") == value else ""
+    selected_decimal = lambda value: "selected" if filters.get("decimal_sep", ".") == value else ""
     checked = "checked" if filters.get("only_with_weights") == "1" else ""
     action_options = "\n".join(
         f'<option value="{escape(action)}" {selected(action)}>{escape(action)}</option>'
@@ -467,8 +547,27 @@ def filters_form(view, filters, actions):
   <label>FNac. hasta
     <input name="fecha_hasta" value="{escape(filters.get("fecha_hasta", ""))}" placeholder="YYYY, YYYY-MM o YYYY-MM-DD">
   </label>
+  <label>Mov. desde
+    <input name="fecha_mov_desde" value="{escape(filters.get("fecha_mov_desde", ""))}" placeholder="YYYY, YYYY-MM o YYYY-MM-DD">
+  </label>
+  <label>Mov. hasta
+    <input name="fecha_mov_hasta" value="{escape(filters.get("fecha_mov_hasta", ""))}" placeholder="YYYY, YYYY-MM o YYYY-MM-DD">
+  </label>
+  <label>Sexo
+    <select name="sexo">
+      <option value="Todos" {selected_sexo("Todos")}>Todos</option>
+      <option value="Hembra" {selected_sexo("Hembra")}>Hembra</option>
+      <option value="Macho" {selected_sexo("Macho")}>Macho</option>
+    </select>
+  </label>
   <label class="acciones">Acción
     <select name="accion">{action_options}</select>
+  </label>
+  <label>Decimal Excel
+    <select name="decimal_sep">
+      <option value="." {selected_decimal(".")}>Punto</option>
+      <option value="," {selected_decimal(",")}>Coma</option>
+    </select>
   </label>
   <label class="checkbox">
     <input type="checkbox" name="only_with_weights" value="1" {checked}>
@@ -486,8 +585,12 @@ def table_html(cols, rows, filters, view):
 
     export_params = {k: v for k, v in filters.items() if v and k not in {"message", "type"}}
     export_params["view"] = view
-    query = urlencode(export_params)
-    export_link = f"/export?{escape(query)}"
+    csv_params = dict(export_params)
+    csv_params["format"] = "csv"
+    xlsx_params = dict(export_params)
+    xlsx_params["format"] = "xlsx"
+    csv_link = f"/export?{escape(urlencode(csv_params))}"
+    xlsx_link = f"/export?{escape(urlencode(xlsx_params))}"
     summary_parts = [f"Total filas: {len(rows)}"]
     if view == "pesos" and "Peso" in cols:
         weights = [parse_number(row["Peso"]) for row in rows]
@@ -503,7 +606,10 @@ def table_html(cols, rows, filters, view):
     return f"""
 <section class="results-head">
   <strong>{escape(summary)}</strong>
-  <a class="button" href="{export_link}">Exportar CSV</a>
+  <div class="export-actions">
+    <a class="button secondary" href="{csv_link}">Exportar CSV</a>
+    <a class="button" href="{xlsx_link}">Exportar Excel</a>
+  </div>
 </section>
 <div class="table-wrap">
   <table>
@@ -644,13 +750,26 @@ class AppHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/export":
                 view, cols, rows = run_query(params.get("view", "animales"), params)
-                data = export_csv(cols, rows)
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "text/csv; charset=utf-8")
-                self.send_header("Content-Disposition", f'attachment; filename="{view}.csv"')
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
+                export_format = params.get("format", "csv")
+                if export_format == "xlsx":
+                    data = export_excel(cols, rows, params.get("decimal_sep", "."))
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header(
+                        "Content-Type",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                    self.send_header("Content-Disposition", f'attachment; filename="{view}.xlsx"')
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                else:
+                    data = export_csv(cols, rows)
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "text/csv; charset=utf-8")
+                    self.send_header("Content-Disposition", f'attachment; filename="{view}.csv"')
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
                 return
 
             if parsed.path != "/":
