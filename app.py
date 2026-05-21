@@ -665,6 +665,12 @@ def table_html(cols, rows, filters, view):
         weights = [weight for weight in weights if weight is not None]
         if weights:
             summary_parts.append(f"Peso promedio: {(sum(weights) / len(weights)):.1f}")
+    elif view == "animales" and "UltimoPeso" in cols:
+        weights = [parse_number(row["UltimoPeso"]) for row in rows]
+        weights = [weight for weight in weights if weight is not None]
+        summary_parts.append(f"Total con peso: {len(weights)}")
+        if weights:
+            summary_parts.append(f"Peso promedio: {(sum(weights) / len(weights)):.1f}")
     summary = " | ".join(summary_parts)
     active_sort = filters.get("sort_by")
     active_dir = filters.get("sort_dir", "asc")
