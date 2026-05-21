@@ -319,7 +319,45 @@ def run_query(view, filters):
         order_by = ' ORDER BY d."IDE", l."Fecha"'
     else:
         view = "animales"
-        query = 'SELECT d."IDE", d."IDV", d."SEXO", d."RAZA", d."CRUZA", d."FECHANAC" FROM "DatoAnimal" d WHERE 1=1'
+        query = """
+            SELECT
+                d."IDE",
+                d."IDV",
+                d."SEXO",
+                d."RAZA",
+                d."CRUZA",
+                d."FECHANAC",
+                (
+                    SELECT p."Peso"
+                    FROM "Pesos" p
+                    WHERE p."IDE" = d."IDE"
+                    ORDER BY p."Fecha" DESC, p."Hora" DESC
+                    LIMIT 1
+                ) AS "UltimoPeso",
+                (
+                    SELECT p."Fecha"
+                    FROM "Pesos" p
+                    WHERE p."IDE" = d."IDE"
+                    ORDER BY p."Fecha" DESC, p."Hora" DESC
+                    LIMIT 1
+                ) AS "FechaUltimoPeso",
+                (
+                    SELECT l."Accion"
+                    FROM "Lecturas" l
+                    WHERE l."IDE" = d."IDE"
+                    ORDER BY l."Fecha" DESC, l."ID" DESC
+                    LIMIT 1
+                ) AS "UltimaAccion",
+                (
+                    SELECT l."Fecha"
+                    FROM "Lecturas" l
+                    WHERE l."IDE" = d."IDE"
+                    ORDER BY l."Fecha" DESC, l."ID" DESC
+                    LIMIT 1
+                ) AS "FechaUltimaAccion"
+            FROM "DatoAnimal" d
+            WHERE 1=1
+        """
         order_by = ' ORDER BY d."IDE"'
 
     ide = (filters.get("ide") or "").strip()
