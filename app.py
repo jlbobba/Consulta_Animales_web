@@ -210,6 +210,22 @@ def parse_iso_date(value):
         return None
 
 
+def latest_weight_by_ide(rows):
+    latest = {}
+    for row in rows:
+        ide = row["IDE"]
+        weight = parse_number(row["Peso"])
+        if ide is None or weight is None:
+            continue
+        date_value = parse_iso_date(row["Fecha"]) or datetime.min
+        time_value = str(row["Hora"] or "")
+        key = str(ide)
+        current = latest.get(key)
+        if current is None or (date_value, time_value) > current["sort_key"]:
+            latest[key] = {"sort_key": (date_value, time_value), "weight": weight}
+    return [item["weight"] for item in latest.values()]
+
+
 def add_pesos_calculations(cols, rows):
     if not rows:
         return cols, rows
@@ -661,9 +677,10 @@ def table_html(cols, rows, filters, view):
     csv_link = f"/export?{escape(urlencode(csv_params))}"
     summary_parts = [f"Total filas: {len(rows)}"]
     if view == "pesos" and "Peso" in cols:
-        weights = [parse_number(row["Peso"]) for row in rows]
-        weights = [weight for weight in weights if weight is not None]
+        weights = latest_weight_by_ide(rows)
+        summary_parts.append(f"Total animales con peso: {len(weights)}")
         if weights:
+            summary_parts.append(f"Suma ultimos pesos: {sum(weights):.1f}")
             summary_parts.append(f"Peso promedio: {(sum(weights) / len(weights)):.1f}")
     elif view == "animales" and "UltimoPeso" in cols:
         weights = [parse_number(row["UltimoPeso"]) for row in rows]
