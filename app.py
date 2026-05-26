@@ -186,6 +186,10 @@ def view_url(view, filters):
     return "/?" + urlencode(params)
 
 
+def query_was_requested(params):
+    return params.get("consultado") == "1" or bool(params.get("sort_by"))
+
+
 def path_with_message(path, message, message_type):
     parsed = urlparse(path or "/")
     params = {key: values[0] for key, values in parse_qs(parsed.query).items()}
@@ -681,6 +685,7 @@ def filters_form(view, filters, actions):
     return f"""
 <form class="filters" method="get" action="/">
   <input type="hidden" name="view" value="{escape(view)}">
+  <input type="hidden" name="consultado" value="1">
   <label>IDE
     <input name="ide" value="{escape(filters.get("ide", ""))}" placeholder="Busca parcial">
   </label>
@@ -713,6 +718,15 @@ def filters_form(view, filters, actions):
   <button type="submit">Consultar</button>
   <a class="button secondary" href="/?view={escape(view)}">Limpiar</a>
 </form>
+"""
+
+
+def pending_query_html():
+    return """
+<section class="empty">
+  <h2>Consulta preparada</h2>
+  <p>Seleccione o confirme los filtros y presione Consultar para ver los resultados.</p>
+</section>
 """
 
 
@@ -952,13 +966,18 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
 
             actions = get_actions()
-            view, cols, rows = run_query(params.get("view", "animales"), params)
+            requested = query_was_requested(params)
+            view = params.get("view", "animales")
+            results_html = pending_query_html()
+            if requested:
+                view, cols, rows = run_query(view, params)
+                results_html = table_html(cols, rows, params, view)
             message = params.get("message")
             message_type = params.get("type", "ok")
             current_filters = clean_filter_params(params)
             body = (
                 filters_form(view, params, actions)
-                + table_html(cols, rows, params, view)
+                + results_html
                 + '<section class="forms-grid">'
                 + action_form(actions, user)
                 + change_ide_form(user)
