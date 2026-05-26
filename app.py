@@ -226,6 +226,32 @@ def latest_weight_by_ide(rows):
     return [item["weight"] for item in latest.values()]
 
 
+def applied_filters_text(filters):
+    labels = {
+        "ide": "IDE contiene",
+        "fecha_desde": "FNac. desde",
+        "fecha_hasta": "FNac. hasta",
+        "fecha_mov_desde": "Mov. desde",
+        "fecha_mov_hasta": "Mov. hasta",
+        "sexo": "Sexo",
+        "accion": "Acción",
+    }
+    parts = []
+    for key in ["ide", "fecha_desde", "fecha_hasta", "fecha_mov_desde", "fecha_mov_hasta", "sexo", "accion"]:
+        value = (filters.get(key) or "").strip()
+        if not value or value == "Todos":
+            continue
+        separator = " " if key == "ide" else " = "
+        parts.append(f"{labels[key]}{separator}{value}")
+
+    if filters.get("only_with_weights") == "1":
+        parts.append("Solo con pesajes")
+
+    if not parts:
+        return "Filtros aplicados: Ninguno"
+    return "Filtros aplicados: " + " | ".join(parts)
+
+
 def add_pesos_calculations(cols, rows):
     if not rows:
         return cols, rows
@@ -666,7 +692,12 @@ def filters_form(view, filters, actions):
 
 def table_html(cols, rows, filters, view):
     if not cols:
-        return '<section class="empty">No hay resultados para mostrar.</section>'
+        return f"""
+<section class="results-summary">
+  <div class="filters-applied">{escape(applied_filters_text(filters))}</div>
+</section>
+<section class="empty">No hay resultados para mostrar.</section>
+"""
 
     export_params = {k: v for k, v in filters.items() if v and k not in {"message", "type"}}
     export_params["view"] = view
@@ -690,6 +721,7 @@ def table_html(cols, rows, filters, view):
             summary_parts.append(f"Suma pesos: {sum(weights):.1f}")
             summary_parts.append(f"Peso promedio: {(sum(weights) / len(weights)):.1f}")
     summary = " | ".join(summary_parts)
+    filters_summary = applied_filters_text(filters)
     active_sort = filters.get("sort_by")
     active_dir = filters.get("sort_dir", "asc")
     head_cells = []
@@ -708,8 +740,10 @@ def table_html(cols, rows, filters, view):
         cells = "".join(f"<td>{escape('' if row[col] is None else str(row[col]))}</td>" for col in cols)
         body_rows.append(f"<tr>{cells}</tr>")
     return f"""
-<section class="results-head">
-  <strong>{escape(summary)}</strong>
+<section class="results-summary">
+  <div class="filters-applied">{escape(filters_summary)}</div>
+  <div class="results-head">
+    <strong>{escape(summary)}</strong>
   <div class="export-actions">
     <a class="button secondary" href="{csv_link}">Exportar CSV</a>
     <form class="export-excel-form" method="get" action="/export">
@@ -723,6 +757,7 @@ def table_html(cols, rows, filters, view):
         </select>
       </label>
     </form>
+  </div>
   </div>
 </section>
 <div class="table-wrap">

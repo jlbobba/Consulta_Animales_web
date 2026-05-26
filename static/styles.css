@@ -134,12 +134,21 @@ select {
   width: auto;
 }
 
+.results-summary {
+  margin-bottom: 10px;
+}
+
+.filters-applied {
+  color: #4c5a6a;
+  font-size: 0.92rem;
+  margin-bottom: 6px;
+}
+
 .results-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 10px;
 }
 
 .export-actions {
