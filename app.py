@@ -644,6 +644,24 @@ def html_page(title, body, message=None, message_type="ok", active_view="animale
     {flash}
     {body}
   </main>
+  <script>
+    (() => {{
+      const form = document.querySelector(".filters");
+      const warning = document.querySelector(".stale-warning");
+      const table = document.querySelector(".table-wrap");
+      if (!form || !warning || !table) return;
+
+      const markStale = () => {{
+        warning.hidden = false;
+        table.classList.add("stale-results");
+      }};
+
+      form.querySelectorAll("input:not([type='hidden']), select").forEach((field) => {{
+        field.addEventListener("input", markStale);
+        field.addEventListener("change", markStale);
+      }});
+    }})();
+  </script>
 </body>
 </html>"""
 
@@ -782,6 +800,7 @@ def table_html(cols, rows, filters, view):
     return f"""
 <section class="results-summary">
   <div class="filters-applied">{escape(filters_summary)}</div>
+  <div class="stale-warning" hidden>Filtros modificados sin consultar. Los resultados mostrados corresponden a la consulta anterior.</div>
   <div class="results-head">
     <strong>{escape(summary)}</strong>
   <div class="export-actions">

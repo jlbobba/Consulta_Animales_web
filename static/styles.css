@@ -144,6 +144,16 @@ select {
   margin-bottom: 6px;
 }
 
+.stale-warning {
+  background: #fff3cd;
+  border: 1px solid #e7c56a;
+  border-radius: 6px;
+  color: #5f4300;
+  font-weight: 600;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+}
+
 .results-head {
   display: flex;
   align-items: center;
@@ -187,6 +197,12 @@ select {
   background: #ffffff;
   border: 1px solid #d8dee8;
   border-radius: 8px;
+  transition: opacity 0.15s ease, border-color 0.15s ease;
+}
+
+.table-wrap.stale-results {
+  border-color: #e7c56a;
+  opacity: 0.55;
 }
 
 table {
