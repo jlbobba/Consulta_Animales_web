@@ -154,6 +154,14 @@ def date_clauses(column, start, end):
     return clauses, params
 
 
+def movement_exists_sql(table, alias, date_column, start, end):
+    clauses, params = date_clauses(date_column, start, end)
+    where = f'{alias}."IDE" = d."IDE"'
+    for clause in clauses:
+        where += f" AND {clause}"
+    return f'EXISTS (SELECT 1 FROM "{table}" {alias} WHERE {where})', params
+
+
 def clean_filter_params(params):
     allowed = {
         "ide",
@@ -439,6 +447,24 @@ def run_query(view, filters):
         for clause in mov_clauses:
             query += f" AND {clause}"
         params.extend(mov_params)
+    elif filters.get("fecha_mov_desde") or filters.get("fecha_mov_hasta"):
+        peso_exists, peso_params = movement_exists_sql(
+            "Pesos",
+            "pm",
+            'pm."Fecha"',
+            filters.get("fecha_mov_desde"),
+            filters.get("fecha_mov_hasta"),
+        )
+        accion_exists, accion_params = movement_exists_sql(
+            "Lecturas",
+            "lm",
+            'lm."Fecha"',
+            filters.get("fecha_mov_desde"),
+            filters.get("fecha_mov_hasta"),
+        )
+        query += f" AND ({peso_exists} OR {accion_exists})"
+        params.extend(peso_params)
+        params.extend(accion_params)
 
     action = filters.get("accion")
     if view == "acciones" and action and action != "Todos":
